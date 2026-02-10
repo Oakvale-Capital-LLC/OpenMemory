@@ -61,7 +61,6 @@ let memories_table: string;
 
 const is_pg = env.metadata_backend === "postgres";
 
-
 function convertPlaceholders(sql: string): string {
     if (!is_pg) return sql;
     let index = 1;
@@ -158,12 +157,21 @@ if (is_pg) {
             `create table if not exists ${m}(id uuid primary key,user_id text,segment integer default 0,content text not null,simhash text,primary_sector text not null,tags text,meta text,created_at bigint,updated_at bigint,last_seen_at bigint,salience double precision,decay_lambda double precision,version integer default 1,mean_dim integer,mean_vec bytea,compressed_vec bytea,feedback_score double precision default 0)`,
         );
         await pg.query(
-            `create table if not exists ${v}(id uuid,sector text,user_id text,v vector,dim integer not null,primary key(id,sector))`,
+            `create table if not exists ${v}(id uuid,sector text,user_id text,v vector(${env.vec_dim}),dim integer not null,primary key(id,sector))`,
         );
+        try {
+            await pg.query(
+                `alter table ${v} alter column v type vector(${env.vec_dim}) using v`,
+            );
+        } catch {
+            // ignore
+        }
         await pg.query(
             `create index if not exists openmemory_vectors_hnsw_idx on ${v} using hnsw (v vector_cosine_ops)`,
         );
-        console.error(`[DB] HNSW index created on ${v} for fast ANN queries`);
+        console.error(
+            `[DB] HNSW index created on ${v} for fast ANN queries`,
+        );
         await pg.query(
             `create table if not exists ${w}(src_id text,dst_id text not null,user_id text,weight double precision not null,created_at bigint,updated_at bigint,primary key(src_id,user_id))`,
         );
@@ -235,13 +243,16 @@ if (is_pg) {
         );
         ready = true;
 
-
         if (env.vector_backend === "valkey") {
             vector_store = new ValkeyVectorStore();
             console.error("[DB] Using Valkey VectorStore");
         } else {
             const vt = process.env.OM_VECTOR_TABLE || "openmemory_vectors";
-            vector_store = new PostgresVectorStore({ run_async, get_async, all_async }, v.replace(/"/g, ""), true);
+            vector_store = new PostgresVectorStore(
+                { run_async, get_async, all_async },
+                v.replace(/\"/g, ""),
+                true,
+            );
             console.error(`[DB] Using Postgres VectorStore with table: ${v}`);
         }
     };
@@ -259,7 +270,7 @@ if (is_pg) {
     get_async = async (sql, p = []) => (await safe_exec(sql, p))[0];
     all_async = async (sql, p = []) => await safe_exec(sql, p);
     const clean = (s: string) =>
-        s ? s.replace(/"/g, "").replace(/\s+OR\s+/gi, " OR ") : "";
+        s ? s.replace(/\"/g, "").replace(/\s+OR\s+/gi, " OR ") : "";
     q = {
         ins_mem: {
             run: (...p) =>
@@ -339,15 +350,13 @@ if (is_pg) {
         },
         get_max_segment: {
             get: () =>
-                get_async(
-                    `select coalesce(max(segment), 0) as max_seg from ${m}`,
+                get_async(`select coalesce(max(segment), 0) as max_seg from ${m}`,
                     [],
                 ),
         },
         get_segments: {
             all: () =>
-                all_async(
-                    `select distinct segment from ${m} order by segment desc`,
+                all_async(`select distinct segment from ${m} order by segment desc`,
                     [],
                 ),
         },
@@ -413,8 +422,7 @@ if (is_pg) {
                 run_async(`update ${l} set status=$2,err=$3 where id=$1`, p),
         },
         get_pending_logs: {
-            all: () =>
-                all_async(`select * from ${l} where status=$1`, ["pending"]),
+            all: () => all_async(`select * from ${l} where status=$1`, ["pending"]),
         },
         get_failed_logs: {
             all: () =>
@@ -439,10 +447,9 @@ if (is_pg) {
         },
         get_user: {
             get: (user_id) =>
-                get_async(
-                    `select * from "${sc}"."openmemory_users" where user_id=$1`,
-                    [user_id],
-                ),
+                get_async(`select * from "${sc}"."openmemory_users" where user_id=$1`, [
+                    user_id,
+                ]),
         },
         upd_user_summary: {
             run: (...p) =>
@@ -461,9 +468,7 @@ if (is_pg) {
         },
     };
 } else {
-    const db_path =
-        env.db_path ||
-        path.resolve(__dirname, "../../data/openmemory.sqlite");
+    const db_path = env.db_path || path.resolve(__dirname, "../../data/openmemory.sqlite");
     const dir = path.dirname(db_path);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const db = new sqlite3.Database(db_path);
@@ -509,30 +514,16 @@ if (is_pg) {
         db.run(
             "create index if not exists idx_memories_sector on memories(primary_sector)",
         );
-        db.run(
-            "create index if not exists idx_memories_segment on memories(segment)",
-        );
-        db.run(
-            "create index if not exists idx_memories_simhash on memories(simhash)",
-        );
-        db.run(
-            "create index if not exists idx_memories_ts on memories(last_seen_at)",
-        );
-        db.run(
-            "create index if not exists idx_memories_user on memories(user_id)",
-        );
+        db.run("create index if not exists idx_memories_segment on memories(segment)");
+        db.run("create index if not exists idx_memories_simhash on memories(simhash)");
+        db.run("create index if not exists idx_memories_ts on memories(last_seen_at)");
+        db.run("create index if not exists idx_memories_user on memories(user_id)");
         db.run(
             `create index if not exists idx_vectors_user on ${sqlite_vector_table}(user_id)`,
         );
-        db.run(
-            "create index if not exists idx_waypoints_src on waypoints(src_id)",
-        );
-        db.run(
-            "create index if not exists idx_waypoints_dst on waypoints(dst_id)",
-        );
-        db.run(
-            "create index if not exists idx_waypoints_user on waypoints(user_id)",
-        );
+        db.run("create index if not exists idx_waypoints_src on waypoints(src_id)");
+        db.run("create index if not exists idx_waypoints_dst on waypoints(dst_id)");
+        db.run("create index if not exists idx_waypoints_user on waypoints(user_id)");
         db.run("create index if not exists idx_stats_ts on stats(ts)");
         db.run("create index if not exists idx_stats_type on stats(type)");
         db.run(
@@ -577,31 +568,24 @@ if (is_pg) {
     get_async = one;
     all_async = many;
 
-
-
-
-
-
-
-
-
-
-
-
     if (env.vector_backend === "valkey") {
         vector_store = new ValkeyVectorStore();
         console.error("[DB] Using Valkey VectorStore");
     } else {
-        vector_store = new PostgresVectorStore({ run_async, get_async, all_async }, sqlite_vector_table);
-        console.error(`[DB] Using SQLite VectorStore with table: ${sqlite_vector_table}`);
+        vector_store = new PostgresVectorStore(
+            { run_async, get_async, all_async },
+            sqlite_vector_table,
+        );
+        console.error(
+            `[DB] Using SQLite VectorStore with table: ${sqlite_vector_table}`,
+        );
     }
-
 
     class Mutex {
         private mutex = Promise.resolve();
         lock(): Promise<() => void> {
-            let unlock: (value?: void) => void = () => { };
-            const willUnlock = new Promise<void>(resolve => {
+            let unlock: (value?: void) => void = () => {};
+            const willUnlock = new Promise<void>((resolve) => {
                 unlock = resolve;
             });
             const willAcquire = this.mutex.then(() => unlock);
@@ -659,7 +643,6 @@ if (is_pg) {
         },
         upd_mean_vec: {
             run: (...p) =>
-
                 exec("update memories set mean_dim=?,mean_vec=? where id=?", [
                     p[1],
                     p[2],
@@ -667,12 +650,10 @@ if (is_pg) {
                 ]),
         },
         upd_compressed_vec: {
-            run: (...p) =>
-                exec("update memories set compressed_vec=? where id=?", p),
+            run: (...p) => exec("update memories set compressed_vec=? where id=?", p),
         },
         upd_feedback: {
-            run: (...p) =>
-                exec("update memories set feedback_score=? where id=?", p),
+            run: (...p) => exec("update memories set feedback_score=? where id=?", p),
         },
         upd_seen: {
             run: (...p) =>
@@ -722,23 +703,14 @@ if (is_pg) {
         },
         get_segment_count: {
             get: (segment) =>
-                one("select count(*) as c from memories where segment=?", [
-                    segment,
-                ]),
+                one("select count(*) as c from memories where segment=?", [segment]),
         },
         get_max_segment: {
-            get: () =>
-                one(
-                    "select coalesce(max(segment), 0) as max_seg from memories",
-                    [],
-                ),
+            get: () => one("select coalesce(max(segment), 0) as max_seg from memories", []),
         },
         get_segments: {
             all: () =>
-                many(
-                    "select distinct segment from memories order by segment desc",
-                    [],
-                ),
+                many("select distinct segment from memories order by segment desc", []),
         },
         get_mem_by_segment: {
             all: (segment) =>
@@ -771,10 +743,10 @@ if (is_pg) {
         },
         get_waypoint: {
             get: (src, dst) =>
-                one(
-                    "select weight from waypoints where src_id=? and dst_id=?",
-                    [src, dst],
-                ),
+                one("select weight from waypoints where src_id=? and dst_id=?", [
+                    src,
+                    dst,
+                ]),
         },
         upd_waypoint: {
             run: (...p) =>
@@ -784,8 +756,7 @@ if (is_pg) {
                 ),
         },
         del_waypoints: {
-            run: (...p) =>
-                exec("delete from waypoints where src_id=? or dst_id=?", p),
+            run: (...p) => exec("delete from waypoints where src_id=? or dst_id=?", p),
         },
         prune_waypoints: {
             run: (t) => exec("delete from waypoints where weight<?", [t]),
@@ -798,12 +769,10 @@ if (is_pg) {
                 ),
         },
         upd_log: {
-            run: (...p) =>
-                exec("update embed_logs set status=?,err=? where id=?", p),
+            run: (...p) => exec("update embed_logs set status=?,err=? where id=?", p),
         },
         get_pending_logs: {
-            all: () =>
-                many("select * from embed_logs where status=?", ["pending"]),
+            all: () => many("select * from embed_logs where status=?", ["pending"]),
         },
         get_failed_logs: {
             all: () =>
@@ -827,8 +796,7 @@ if (is_pg) {
                 ),
         },
         get_user: {
-            get: (user_id) =>
-                one("select * from users where user_id=?", [user_id]),
+            get: (user_id) => one("select * from users where user_id=?", [user_id]),
         },
         upd_user_summary: {
             run: (...p) =>
